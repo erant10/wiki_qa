@@ -2,6 +2,7 @@ import re
 import requests
 import lxml.html
 import sys
+import rdflib
 
 WRONG_Q_FORMAT = "The question you entered is not in the right format. Try one of the following formats:\n" + \
 '\n'.join([
@@ -24,6 +25,8 @@ patterns = [
 
 stopwords = {'is','and','of','the','a',' '}
 
+wiki_prefix = "https://en.wikipedia.org/wiki/"
+
 def extract_relation_and_entity(question):
     """
     extract relations and entities from predefined patterns
@@ -43,7 +46,6 @@ def gen_sparql_query(var_name, entity, relation):
     :param entity: the name of the entity in the query
     :return: a sparql query based on tha variable, entity and relation
     """
-    wiki_prefix = "https://en.wikipedia.org/wiki/"
     where_clause = "wiki:%s wiki:%s ?%s" % (entity, relation, var_name)
     query = "PREFIX wiki: <%s>\n" \
              "SELECT ?%s WHERE {\n" \
@@ -54,7 +56,7 @@ def gen_sparql_query(var_name, entity, relation):
 
 
 def get_infobox_data(entity):
-    url = "https://en.wikipedia.org/wiki/" + entity
+    url = wiki_prefix + entity
     infobox_xpath = "//table[contains(@class, 'infobox')]"
 
     res = requests.get(url)
@@ -103,6 +105,7 @@ def get_relation_from_doc(doc,relation,duplicate=False):
         delimiter = ''
     answer =  delimiter.join(answers)
     if relation == 'Born':
+        # special case - consider the 'Born' field as a single string
         answer = answer.replace('\n',' ')
     return clean_answer(answer)
 
@@ -119,6 +122,19 @@ def clean_answer(s):
     if len(result)>0:
         return [str.strip(' ,') for str in re.split('\\n|\, ',result) if str.strip(' ,') != '' and str.strip(' ,') not in stopwords]
     return []
+
+def build_ontology(entity_name, data):
+    g = rdflib.Graph()
+    entity = rdflib.URIRef(wiki_prefix + entity_name)
+    for (relation, results) in data.items():
+        relation = rdflib.URIRef(wiki_prefix + relation)
+        for result_name in results:
+            result = rdflib.URIRef(wiki_prefix + result_name)
+            g.add((entity, relation, result))
+    g.serialize("graph.nt", format="nt")
+    return g
+
+
 
 def prepare_entity(str):
     return str.strip(' ').replace(' ', '_')
@@ -145,7 +161,7 @@ def get_relation_variations(str):
 
 
 def get_answer(entity_name, relation_name):
-    url = "https://en.wikipedia.org/wiki/" + entity_name
+    url = wiki_prefix + entity_name
 
     res = requests.get(url)
     doc = lxml.html.fromstring(res.content)
