@@ -23,7 +23,7 @@ patterns = [
     re.compile(r'^When was (.*) born[?]$')
     ]
 
-stopwords = {'is','and','of','the','a',' '}
+stopwords = {'is','and','of','the','a',' ','(',')','_','\n'}
 
 wiki_prefix = "https://en.wikipedia.org/wiki/"
 
@@ -39,18 +39,17 @@ def extract_relation_and_entity(question):
     return None
 
 
-def gen_sparql_query(var_name, entity, relation):
+def gen_sparql_query(entity, relation):
     """
-    :param var_name: the name of the variable in the query
     :param relation: the name of the relation in the query
     :param entity: the name of the entity in the query
     :return: a sparql query based on tha variable, entity and relation
     """
-    where_clause = "wiki:%s wiki:%s ?%s" % (entity, relation, var_name)
+    where_clause = "wiki:%s wiki:%s ?%s" % (entity, relation, relation)
     query = "PREFIX wiki: <%s>\n" \
              "SELECT ?%s WHERE {\n" \
              "\t%s\n" \
-             "}" % (wiki_prefix, var_name, where_clause)
+             "}" % (wiki_prefix, relation, where_clause)
 
     return query
 
@@ -73,7 +72,9 @@ def get_infobox_data(entity):
             relation_set.add(relation)
             values = get_relation_from_doc(doc, relation, duplicate=(relations.count(relation) > 1))
             if (values and len(values) > 0):
-                res[relation] = values
+                relation = drop_parentheses(relation)
+                if relation not in stopwords:
+                    res[relation] = values
     return res
 
 
@@ -98,7 +99,9 @@ def get_relation_from_doc(doc,relation,duplicate=False):
                 relation + '\')]/../td//text()'
             )
     if (relation == 'Capital'):
+        # special case - ignore coordinates for capital cities
         answers = answers[0]
+
     if duplicate:
         delimiter = ', '
     else:
@@ -107,31 +110,38 @@ def get_relation_from_doc(doc,relation,duplicate=False):
     if relation == 'Born':
         # special case - consider the 'Born' field as a single string
         answer = answer.replace('\n',' ')
-    return clean_answer(answer)
+    return clean_answer(answer, split_by_comma= duplicate)
 
 
-def clean_answer(s):
+def drop_parentheses(s):
     # remove any brackets while possible
     while True:
         s_new = re.sub(r'([\(\[]).*?([\)\]])', r'', s)
         if s_new == s:
             break
         s = s_new
+    return s
+
+def clean_answer(s, split_by_comma=False):
+    s = drop_parentheses(s)
     # remove trailing spaces and special characters
     result = s.strip().replace(u'\xa0', u'_').strip('\n')
     if len(result)>0:
-        return [str.strip(' ,') for str in re.split('\\n|\, ',result) if str.strip(' ,') != '' and str.strip(' ,') not in stopwords]
+        delim = '\\n'
+        if split_by_comma:
+            delim += '|\, '
+        return [str.strip(' ,') for str in re.split(delim,result) if str.strip(' ,') != '' and str.strip(' ,') not in stopwords]
     return []
+
 
 def build_ontology(entity_name, data):
     g = rdflib.Graph()
-    entity = rdflib.URIRef(wiki_prefix + entity_name)
+    entity = rdflib.URIRef(wiki_prefix + re.sub(r' |\u00A0|\xa0',r'_', entity_name))
     for (relation, results) in data.items():
-        relation = rdflib.URIRef(wiki_prefix + relation)
+        relation = rdflib.URIRef(wiki_prefix + re.sub(r' |\u00A0|\xa0',r'_', relation))
         for result_name in results:
-            result = rdflib.URIRef(wiki_prefix + result_name)
+            result = rdflib.URIRef(wiki_prefix + re.sub(r' |\u00A0|\xa0',r'_', result_name))
             g.add((entity, relation, result))
-    g.serialize("graph.nt", format="nt")
     return g
 
 
@@ -170,40 +180,46 @@ def get_answer(entity_name, relation_name):
     for relation in variations:
         answers = get_relation_from_doc(doc, relation)
         if (answers):
-            return ', '.join(answers)
-    return NO_ANSWER_FOUND
+            return (relation, ', '.join(answers))
+    return (None, NO_ANSWER_FOUND)
 
 
 if __name__ == '__main__':
     question = ' '.join(sys.argv[1:])
 
     res = extract_relation_and_entity(question)
-    if res:
-        if type(res) == str:
-            entity = res
-            relation = 'Born'
-        else:
-            entity = res[1]
-            relation = res[0]
-
-        #infobox_data = get_infobox_data(prepare_entity(entity))
-        print(get_answer(entity,relation))
-
-    else:
+    if not res:
         print(WRONG_Q_FORMAT)
+        sys.exit()  # stop the program
 
-    # print(ent)
-    # if type(ent) == str:
-    #     print(gen_sparql_query('d',ent, "bornOn"))
-    # else:
-    #     print(gen_sparql_query('d', ent[1], ent[0]))
+    if type(res) == str:
+        entity = res
+        relation = 'Born'
+    else:
+        entity = res[1]
+        relation = res[0]
+    # get the answer to the question
+    relation, answer = get_answer(entity,relation)
+    # print the answer to the question
+    print(answer)
 
-    # variations = get_relation_variations(res[0])
-    # for relation in variations:
-    #     answer = get_answer(entity, relation)
-    #     if (answer):
-    #         print(answer)
-    #         sys.exit() # stop searching for answers
-    # print(NO_ANSWER_FOUND)
+    # get all available data from the infobox of the entity's wiki page
+    infobox_data = get_infobox_data(prepare_entity(entity))
+    # build an ontology
+    g = build_ontology(entity, infobox_data)
+    # export to ontology.nt
+    g.serialize("ontology.nt", format="nt")
+
+    if relation:
+        # generate sparql query
+        query = gen_sparql_query(entity.replace(' ', '_'), relation.replace(' ', '_'))
+        # ouput the query into query.sparql
+        query_file = open('query.sparql', 'a+')
+        query_file.write(query)
+        query_file.close()
+        # run the query on the ontology
+        results = g.query(query)
+        print(list(results))
+
 
 
